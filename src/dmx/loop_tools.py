@@ -102,7 +102,7 @@ from dmx.loop_state import (
 from dmx.repeat_until import evaluate_repeat_until
 from dmx.shared_sources import SharedSourceError, read_shared_sources, source_root
 from dmx.validator_runner import evaluate_validator_results, run_validators
-from dmx.workspace import resolve_workspace_root
+from dmx.workspace import ide_folder, resolve_workspace_root, with_skipped_dmx_note
 
 __all__ = ["register_loop_tools"]
 
@@ -126,9 +126,13 @@ def _with_legacy_note(message: str) -> str:
 
 
 def _with_rules_reminder(root: Path, message: str) -> str:
-    """Append the stale-rules line once. A read error leaves *message* as it is."""
+    """Append the stale-rules line once. A read error leaves *message* as it is.
+
+    The rule files are read where the IDE opened, which is where
+    ``setup_ide_rules`` writes them, not the repo root a subfolder resolved to.
+    """
     try:
-        reminder = rules_reminder(root)
+        reminder = rules_reminder(ide_folder() or root)
     except OSError:
         return message
     if not reminder or reminder in message:
@@ -2100,8 +2104,11 @@ def register_loop_tools(app: FastMCP) -> None:
             root = await resolve_workspace_root(ctx, workspace_root)
         except WorkspaceRootInvalid as exc:
             return f"Could not resolve a valid workspace root: {exc}"
-        return _with_rules_reminder(
-            root, _with_legacy_note(_start_loop(root, name, description).message)
+        return with_skipped_dmx_note(
+            root,
+            _with_rules_reminder(
+                root, _with_legacy_note(_start_loop(root, name, description).message)
+            ),
         )
 
     @app.tool
@@ -2180,7 +2187,7 @@ def register_loop_tools(app: FastMCP) -> None:
             root = await resolve_workspace_root(ctx, workspace_root)
         except WorkspaceRootInvalid as exc:
             return f"Could not resolve a valid workspace root: {exc}"
-        return _with_rules_reminder(root, list_skills(root))
+        return with_skipped_dmx_note(root, _with_rules_reminder(root, list_skills(root)))
 
     @app.tool(name="snapshot_loop_for_pr")
     async def snapshot_loop_for_pr_tool(
@@ -2235,7 +2242,7 @@ def register_loop_tools(app: FastMCP) -> None:
             return f"Could not resolve a valid workspace root: {exc}"
 
         def finish(message: str) -> str:
-            return _with_legacy_note(message)
+            return with_skipped_dmx_note(root, _with_legacy_note(message))
 
         try:
             found = _find_active(root)
@@ -2362,7 +2369,7 @@ def register_loop_tools(app: FastMCP) -> None:
             return f"Could not resolve a valid workspace root: {exc}"
 
         def finish(message: str) -> str:
-            return _with_legacy_note(message)
+            return with_skipped_dmx_note(root, _with_legacy_note(message))
 
         try:
             found = _find_active(root)
@@ -2486,4 +2493,6 @@ def register_loop_tools(app: FastMCP) -> None:
         # Also wait when nothing is active yet: chaining marks the old run
         # terminal before the next run's file exists.
         await _wait_for_validation(found[2] if found else "")
-        return _with_rules_reminder(root, _with_legacy_note(loop_status_message(root)))
+        return with_skipped_dmx_note(
+            root, _with_rules_reminder(root, _with_legacy_note(loop_status_message(root)))
+        )
