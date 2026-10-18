@@ -27,10 +27,12 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
+import sys
 import tarfile
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from dmx.shared_sources import SharedSourceError
 
@@ -54,6 +56,7 @@ _GIT_TIMEOUT_SECONDS = 120
 
 VERIFIED_RECORD = ".dmx-verified"
 _SLUG_RE = re.compile(r"[^A-Za-z0-9._-]+")
+_MAX_SLUG = 48
 
 
 class SharedSourceFetchError(SharedSourceError):
@@ -76,8 +79,37 @@ def repo_slug(url: str) -> str:
     text = re.sub(r"^[A-Za-z][A-Za-z0-9+.-]*://", "", text)
     text = re.sub(r"^[^@/]+@", "", text)
     text = text.replace(":", "/").removesuffix("/").removesuffix(".git")
-    slug = _SLUG_RE.sub("-", text.replace("/", "-")).strip("-.")
-    return slug or "source"
+    slug = _SLUG_RE.sub("-", text.replace("/", "-")).strip("-.") or "source"
+    if len(slug) > _MAX_SLUG:
+        # A long address, such as a local path, would push the mirror and
+        # cache folders past Windows' 260-character path limit. Keep the
+        # readable end and add a hash of the whole address so it stays unique.
+        digest = hashlib.sha256(url.strip().encode("utf-8")).hexdigest()[:10]
+        slug = f"{slug[-(_MAX_SLUG - 11) :].strip('-.')}-{digest}"
+    return slug
+
+
+def remove_tree(path: Path) -> None:
+    """``shutil.rmtree`` that also removes read-only files.
+
+    Windows refuses to delete a read-only file, and git marks its object
+    files read-only, as a source tree's own files may be.
+    """
+
+    def clear_and_retry(function: Any, failed: str, _info: Any) -> None:
+        os.chmod(failed, stat.S_IWRITE)
+        function(failed)
+
+    if sys.version_info >= (3, 12):
+        shutil.rmtree(path, onexc=clear_and_retry)
+    else:
+        shutil.rmtree(path, onerror=clear_and_retry)
+
+
+def _discard(path: Path) -> None:
+    """Remove a half-written mirror or tree, if there is one."""
+    with contextlib.suppress(OSError):
+        remove_tree(path)
 
 
 def cached_tree(workspace_root: Path, url: str, commit: str) -> Path:
@@ -116,16 +148,16 @@ def _ensure_mirror(source: SharedSource) -> Path:
         return mirror
     mirror.parent.mkdir(parents=True, exist_ok=True)
     partial = mirror.with_name(f"{mirror.name}.tmp-{os.getpid()}")
-    shutil.rmtree(partial, ignore_errors=True)
+    _discard(partial)
     cloned = _git(["clone", "--mirror", "--quiet", source.url, str(partial)])
     if cloned.returncode != 0:
-        shutil.rmtree(partial, ignore_errors=True)
+        _discard(partial)
         raise _fetch_error(source, "", cloned.stderr or cloned.stdout)
     try:
         partial.rename(mirror)
     except OSError:
         # Another process finished the same mirror first.
-        shutil.rmtree(partial, ignore_errors=True)
+        _discard(partial)
     return mirror
 
 
@@ -183,11 +215,11 @@ def extract_commit(
     if target.is_dir():
         if not fresh:
             return target
-        shutil.rmtree(target)
+        remove_tree(target)
     mirror = _ensure_commit(source, commit)
     _ensure_cache_root(workspace_root)
     partial = target.with_name(f"{target.name}.tmp-{os.getpid()}")
-    shutil.rmtree(partial, ignore_errors=True)
+    _discard(partial)
     partial.mkdir()
     archive = subprocess.Popen(
         ["git", "archive", "--format=tar", commit],
@@ -204,17 +236,17 @@ def extract_commit(
                 tar.extractall(partial)  # noqa: S202 — git archive output of a locked commit
     except (tarfile.TarError, OSError) as exc:
         archive.kill()
-        shutil.rmtree(partial, ignore_errors=True)
+        _discard(partial)
         raise _fetch_error(source, f"at {commit[:12]}", str(exc)) from exc
     finally:
         _out, err = archive.communicate()
     if archive.returncode != 0:
-        shutil.rmtree(partial, ignore_errors=True)
+        _discard(partial)
         raise _fetch_error(source, f"at {commit[:12]}", err.decode("utf-8", "replace"))
     try:
         partial.rename(target)
     except OSError:
-        shutil.rmtree(partial, ignore_errors=True)
+        _discard(partial)
     return target
 
 
@@ -273,12 +305,12 @@ def ensure_fetched(workspace_root: Path, source: SharedSource, entry: LockEntry)
         _record(tree, entry.hash)
         return tree
     if tree.is_dir():
-        shutil.rmtree(tree)
+        remove_tree(tree)
     tree = extract_commit(workspace_root, source, entry.commit)
     actual = tree_hash(tree)
     if actual != entry.hash:
         with contextlib.suppress(OSError):
-            shutil.rmtree(tree)
+            remove_tree(tree)
         raise SharedSourceFetchError(
             f"Shared source `{source.name}` at {entry.commit[:12]} does not match "
             f"`.dmx/shared-sources.lock` (expected {entry.hash}, got {actual}). "
