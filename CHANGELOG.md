@@ -9,6 +9,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **(GH-137)** Trim failed component output before validator summaries when bounding pause messages, preserving every per-run pass/fail line while keeping the end of failure output.
+
 ## [0.8.0] — 2026-10-18
 
 **Upgrading from 0.7.**
