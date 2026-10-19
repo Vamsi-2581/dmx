@@ -339,3 +339,62 @@ class TestValidationWhy:
         assert "FINAL" in why
         assert "`tests_pass`" in why
         assert "…" in why
+
+    def test_long_component_logs_are_trimmed_before_run_summary(self, tmp_path: Path) -> None:
+        summary_lines = [
+            f"{'✗' if index in (2, 5) else '✓'} run-{index}: "
+            + ("summary " * 29)
+            + f"summary-tail-{index}"
+            for index in range(1, 7)
+        ]
+        summary = "\n".join(["Six component runs:", *summary_lines])
+        output_lines = [f"diagnostic {line:02d} " + ("x" * 180) for line in range(19)]
+        failed_checks = [
+            {
+                "name": f"component_{index}",
+                "pass": index not in (2, 5),
+                "message": "\n".join(
+                    [
+                        *output_lines,
+                        f"failure output tail for component_{index} "
+                        + ("z" * 150)
+                        + f" LOG_END_{index}",
+                    ],
+                ),
+            }
+            for index in range(1, 7)
+        ]
+        _validator(
+            tmp_path,
+            "component_tests",
+            "import json, sys\n"
+            f"summary = {summary!r}\n"
+            f"checks = {failed_checks!r}\n"
+            'print(json.dumps({"pass": False, "message": summary, "checks": checks}))\n'
+            "sys.exit(1)\n",
+        )
+        config = LoopConfig.model_validate(
+            {
+                "name": "validate",
+                "skills": ["validate"],
+                "failure_handling": "pause",
+                "validators": [
+                    {
+                        "tool": "component_tests",
+                        "checks": [
+                            {"name": f"component_{index}", "required": True}
+                            for index in range(1, 7)
+                        ],
+                    }
+                ],
+            }
+        )
+        _ready(tmp_path, config)
+
+        why = _why(_finish_loop(tmp_path, "J", "validate", "task-1", config, {}))
+
+        for index in range(1, 7):
+            status = "✗" if index in (2, 5) else "✓"
+            assert f"{status} run-{index}:" in why
+        assert "LOG_END_2" in why
+        assert "LOG_END_5" in why
