@@ -1292,11 +1292,18 @@ def _largest_droppable(
     return max(candidates, key=lambda key: len("\n".join(bodies[key])))
 
 
-def _shorten_longest(bodies: dict[str, list[str]], overflow: int) -> bool:
+def _shorten_longest(
+    bodies: dict[str, list[str]],
+    overflow: int,
+    *,
+    only_keys: set[str] | None = None,
+) -> bool:
     """Shorten the longest line from the start. Returns whether it changed."""
     where: tuple[str, int] | None = None
     longest = 0
     for key, lines in bodies.items():
+        if only_keys is not None and key not in only_keys:
+            continue
         for index, line in enumerate(lines):
             if len(line) > longest:
                 longest = len(line)
@@ -1327,8 +1334,23 @@ def _bounded_why(groups: list[tuple[str, str, list[tuple[str, bool, str]]]]) -> 
             if not message:
                 continue
             bodies[f"c:{tool}:{name}"] = message.splitlines() or [message]
+    check_keys = {key for key in bodies if key.startswith("c:")}
     rendered = _assemble_why(groups, bodies)
     while len(rendered) > _WHY_LIMIT:
+        check_bodies = {key: bodies[key] for key in check_keys}
+        key = _largest_droppable(check_bodies, set())
+        if key is not None:
+            updated = _drop_one(bodies[key], keep_first=False)
+            if updated is None:
+                break
+            bodies[key] = updated
+            rendered = _assemble_why(groups, bodies)
+            continue
+        if _shorten_longest(
+            bodies, len(rendered) - _WHY_LIMIT, only_keys=check_keys
+        ):
+            rendered = _assemble_why(groups, bodies)
+            continue
         key = _largest_droppable(bodies, keep_first)
         if key is not None:
             updated = _drop_one(bodies[key], keep_first=key in keep_first)
